@@ -1,0 +1,8 @@
+PyPDF2==1.26.0
+gTTS==2.2.3
+googletrans==4.0.0rc1
+edge-tts
+PyMuPDF
+tqdm
+httpx==0.13.3
+httpcore==0.9.1

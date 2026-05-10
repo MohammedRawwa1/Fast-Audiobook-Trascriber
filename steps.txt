@@ -1,0 +1,58 @@
+Install and usage steps (recommended)
+
+1) Create and activate a virtual environment (Windows example):
+
+```
+python -m venv venv
+venv\Scripts\activate
+```
+
+2) Install Python dependencies from `requirements.txt`:
+
+```
+pip install -r requirements.txt
+```
+
+3) If you get issues with `googletrans`, reinstall the compatible rc version:
+
+```
+pip uninstall googletrans -y
+pip install googletrans==4.0.0rc1
+```
+
+4) System dependencies:
+- Install `ffmpeg` and `ffprobe` (required). On Windows you can use Chocolatey or download from https://ffmpeg.org:
+
+```
+choco install ffmpeg -y
+```
+
+5) Optional / recommended extra packages (if you plan to use cloud speech APIs):
+
+```
+pip install google-api-core google-auth google-cloud-core google-cloud-speech google-cloud-translate googleapis-common-protos
+```
+
+6) Notes about `edge-tts` and HTTP clients:
+`edge-tts` may rely on HTTP client libraries (`httpx`/`httpcore`) that sometimes require particular versions. A known working pair from a tested environment is:
+
+```
+httpx==0.13.3
+httpcore==0.9.1
+```
+
+If you encounter runtime errors related to `httpx` or `httpcore`, install those exact versions:
+
+```
+pip install "httpx==0.13.3" "httpcore==0.9.1"
+```
+
+7) Run the scripts:
+
+```
+python pdf-to-mp3.py               # simple gTTS path
+python pdf-to-mp3-english.py      # advanced Edge TTS (English-focused)
+python pdf-to-mp3-arabic.py    # Arabic-focused Edge TTS
+```
+
+If you want, I can pin exact versions in `requirements.txt` to match a known working environment.
