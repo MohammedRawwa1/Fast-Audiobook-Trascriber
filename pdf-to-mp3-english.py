@@ -8,7 +8,6 @@ import shutil
 import json
 import random
 import pathlib
-import os
 from tqdm import tqdm
 
 os.environ["PYTHONUTF8"] = "1"
@@ -69,41 +68,96 @@ DEFAULT_CHUNK_SIZE = 2500
 CORRUPT_THRESHOLD = 1500
 
 
-def normalize_pdf_text(text):
-    # 1. fix line-break word splits FIRST
+def normalize_english_text(text):
+    """Normalize English text for clean TTS pronunciation.
+    Handles PDF artifacts, ligatures, symbols, and spacing issues.
+    """
+    # --- Strip bullet points and list markers FIRST (before line joining) ---
+    # Must run while markers are still at line starts
+    # Unicode bullets: •‣⁃▪▫■□●○◆◇★☆➤►▸▹▾▿➔➜
+    text = re.sub(r'(?m)^\s*[•‣⁃▪▫■□●○◆◇★☆➤►▸▹▾鿿➔➜]\s*', '', text)
+    # Dash/asterisk bullets: "- " or "* " at line start
+    text = re.sub(r'(?m)^\s*[-*]\s+', '', text)
+    # Numbered lists: "1. ", "2) ", "(3) "
+    text = re.sub(r'(?m)^\s*\(?\d+\)?[.)]\s+', '', text)
+    # Lettered lists: "a. ", "b) ", "(c) "
+    text = re.sub(r'(?m)^\s*\(?[a-zA-Z]\)?[.)]\s+', '', text)
+    # Roman numeral lists: "I. ", "II) ", "(iii) "
+    text = re.sub(
+        r'(?m)^\s*\(?'                  # optional leading (
+        r'(?:M{0,3})'                     # thousands
+        r'(?:CM|CD|D?C{0,3})'             # hundreds
+        r'(?:XC|XL|L?X{0,3})'             # tens
+        r'(?:IX|IV|V?I{0,3})'             # ones
+        r'\)?'                            # optional trailing )
+        r'[.)]\s+',                       # dot or ) + space
+        '', text, flags=re.IGNORECASE
+    )
+
+    # --- Fix PDF line-break artifacts ---
+    # Hyphenation across lines: "hy-\nphen" → "hyphen"
+    text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)
+    # Word splits across lines: "word\nword" → "word word"
     text = re.sub(r'(\w)\s*\n\s*(\w)', r'\1 \2', text)
 
-    # 2. fix hyphenation across lines
-    text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)
-
-    # 3. fix leftover broken joins like "t texting"
-    text = re.sub(r'\b([a-zA-Z])\s+([a-zA-Z]{3,})', r'\1\2', text)
-
-    # 4. normalize spaces
+    # --- Normalize spaces ---
     text = re.sub(r'[ \t]+', ' ', text)
+
+    # --- Remove URLs ---
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'www\.\S+', '', text)
+
+    # --- Remove standalone page numbers ---
+    text = re.sub(r'(?m)^\s*\d+\s*$', ' ', text)
+    text = re.sub(r'(?i)(?:page\s*)?\b\d+\b(?=\s*$)', '', text)
+
+    # --- Remove control characters (except newline) ---
+    text = re.sub(r'[\x00-\x09\x0B-\x1F\x7F]', ' ', text)
+
+    # --- PDF ligature expansion ---
+    text = text.replace('\ufb01', 'fi').replace('\ufb02', 'fl')
+    text = text.replace('\ufb00', 'ff').replace('\ufb03', 'ffi').replace('\ufb04', 'ffl')
+
+    # --- Remove symbols that TTS reads as English words ---
+    text = re.sub(r'[#$%^*_+=~`|\\]', '', text)
+
+    # --- Normalize repeated punctuation ---
+    text = re.sub(r'\.{4,}', '...', text)     # 4+ dots → ellipsis
+    text = re.sub(r'!{3,}', '!!', text)
+    text = re.sub(r'\?{3,}', '??', text)
+    text = re.sub(r'[,]{2,}', ',', text)
+    text = re.sub(r';{2,}', ';', text)
+    text = re.sub(r':{2,}', ':', text)
+
+    # --- Normalize excessive newlines ---
+    text = re.sub(r'\n{3,}', '\n\n', text)
 
     return text.strip()
 
-def fix_word_boundaries(text):
-    text = re.sub(r'(?<!\n)(\w)\s*\n\s*(\w)(?!\n)', r'\1 \2', text)
-    text = re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
+def escape_ssml(text):
+    """Escape SSML special characters, but preserve existing SSML tags like <break>."""
+    # First, temporarily protect known SSML tags
+    breaks = []
+    def _save_break(m):
+        breaks.append(m.group(0))
+        return f"\x00BREAK{len(breaks)-1}\x00"
+    text = re.sub(r'<break\s+[^>]+/?>', _save_break, text)
+
+    # Escape remaining < > &
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+
+    # Restore protected SSML tags
+    for i, b in enumerate(breaks):
+        text = text.replace(f"\x00BREAK{i}\x00", b)
     return text
 
-def escape_ssml(text):
-    return (
-        text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    )
-    
 def build_ssml(text, profile=None):
+    """Wrap pre-cleaned text in SSML tags.
+    Text should already be escaped and normalized before calling this.
+    """
     profile = profile or VOICE_PRESETS[VOICE_PROFILE]
-
-    text = normalize_pdf_text(text)
-    text = fix_word_boundaries(text)
-
-    text = escape_ssml(text)
-
     return f"""
 <speak xmlns="http://www.w3.org/2001/10/synthesis"
        xml:lang="en-US">
@@ -246,8 +300,27 @@ def extract_bookmarks(pdf_path):
     doc = fitz.open(pdf_path)
     toc = doc.get_toc()
     doc.close()
-    return [{"title": t.strip(), "page": p-1} for l, t, p in toc if l <= 2]
 
+    chapters = []
+
+    for level, title, page in toc:
+        if level > 2:
+            continue
+
+        # Convert to zero-based index
+        page -= 1
+
+        # Ignore invalid bookmark pages
+        if page < 0:
+            continue
+
+        chapters.append({
+            "title": title.strip(),
+            "page": page
+        })
+
+    return chapters
+    
 def detect_chapters(pages):
     chapters = []
 
@@ -303,12 +376,6 @@ def extract_pages(pdf_path):
     pages = []
 
     for i, page in enumerate(doc):
-
-        rect = page.rect
-
-        # remove top/bottom margins
-        clip = None
-
         text = page.get_text("text", sort=True)
 
         pages.append({
@@ -506,6 +573,9 @@ def build_chapter_texts(chapter_ranges, pages):
             for i in range(ch["start_page"], ch["end_page"])
         )
 
+        # Normalize full chapter text once upfront
+        text = normalize_english_text(text)
+
         chapter_texts.append({
             "title": ch["title"],
             "text": text
@@ -541,7 +611,12 @@ def build_chunks(ranges, pages):
     return chunks, chapter_map
     
 def build_chapter_ranges(chapters, pages):
-    chapters = sorted(chapters, key=lambda x: x["page"])
+    chapters = [
+        ch for ch in chapters
+        if 0 <= ch["page"] < len(pages)
+    ]
+
+    chapters.sort(key=lambda x: x["page"])
 
     ranges = []
     for i, ch in enumerate(chapters):
@@ -555,8 +630,7 @@ def build_chapter_ranges(chapters, pages):
         })
 
     return ranges
-
-
+    
 def chunk_chapters(chapter_texts, size):
 
     all_chunks = []
@@ -571,6 +645,8 @@ def chunk_chapters(chapter_texts, size):
         for i, c in enumerate(chunks):
 
             safe = c
+            # Escape SSML special chars BEFORE inserting break tags
+            safe = escape_ssml(safe)
             safe = re.sub(r'\n{2,}', '<break time="500ms"/>', safe)
             safe = re.sub(r'\n', ' ', safe).strip()
 
@@ -845,61 +921,7 @@ async def worker(
     except asyncio.CancelledError:
         pass
         
-def choose_voice_profile(name):
 
-    lower = name.lower()
-
-    profiles = {
-
-        "story": [
-            "novel",
-            "story",
-            "fantasy",
-            "fiction",
-            "adventure",
-            "sci-fi"
-        ],
-
-        "female_story": [
-            "romance",
-            "drama"
-        ],
-
-        "warm": [
-            "psychology",
-            "mindset",
-            "selfhelp",
-            "motivation",
-            "meditation"
-        ]
-    }
-
-    for profile, keywords in profiles.items():
-
-        if any(k in lower for k in keywords):
-            return profile
-
-    return "documentary"
-
-async def get_durations_from_files(valid_files):
-    async def probe(path):
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [
-                "ffprobe","-v","error",
-                "-show_entries","format=duration",
-                "-of","default=noprint_wrappers=1:nokey=1",
-                path
-            ],
-            stdout=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace"
-        )
-        return float(result.stdout.strip() or 0)
-
-    durations = await asyncio.gather(*[probe(p) for _, p in valid_files])
-    return durations
 
 
 # =========================
@@ -983,12 +1005,18 @@ async def main():
         # LOAD PAGES
         # =========================
         pages = extract_pages(pdf_path)
-
+        print("\n========== FIRST 5 PAGES ==========")
+        for i in range(min(5, len(pages))):
+            print(f"\n----- PAGE {i} -----")
+            print(pages[i]["text"][:500])
+        print("===================================\n")
+        
         # =========================
         # DETECT CHAPTERS
         # =========================
         chapters = extract_bookmarks(pdf_path)
-        print(chapters[:5])
+        print("\n========== BOOKMARKS ==========")
+        print(chapters[:10])
 
         if not chapters:
             chapters = detect_chapters_by_font(pdf_path)
@@ -998,33 +1026,44 @@ async def main():
 
         # ALWAYS guarantee page 0 exists
         chapters = sorted(chapters, key=lambda x: x["page"])
+        # Remove invalid bookmarks
+        chapters = [
+            ch for ch in chapters
+            if 0 <= ch["page"] < len(pages)
+        ]
 
+        chapters.sort(key=lambda x: x["page"])
         if not chapters or chapters[0]["page"] != 0:
             chapters.insert(0, {"title": "Start", "page": 0})
 
         # optional safety: ensure last boundary
         if chapters[-1]["page"] != len(pages):
             chapters.append({"title": "End", "page": len(pages)})
-        print(
-            f"Detected chapters: {len(chapters)}"
-        )
+
+        print("\n========== FINAL CHAPTERS ==========")
+        for ch in chapters[:10]:
+            print(ch)
+
+        print(f"\nDetected chapters: {len(chapters)}")
 
         # =========================
         # BUILD CHUNKS
         # =========================
-        ranges = build_chapter_ranges(
-            chapters,
-            pages
-        )
+        ranges = build_chapter_ranges(chapters, pages)
 
-        chunks, chapter_map = build_chunks(
-            ranges,
-            pages
-        )
+        print("\n========== CHAPTER RANGES ==========")
+        for r in ranges[:10]:
+            print(r)
 
-        print(
-            f"Chunks generated: {len(chunks)}"
-        )
+        chunks, chapter_map = build_chunks(ranges, pages)
+
+        print(f"\nChunks generated: {len(chunks)}")
+
+        print("\n========== FIRST 10 CHUNKS ==========")
+        for i in range(min(10, len(chunks))):
+            print(f"\nChunk {i}")
+            print("Chapter:", chunks[i]["chapter_title"])
+            print(chunks[i]["text"][:300])
 
         # =========================
         # OUTPUT FOLDER
@@ -1132,7 +1171,6 @@ async def main():
         telegram_path = os.path.join(output_dir, safe_filename(f"{name}_telegram.md"))
         with open(telegram_path, "w", encoding="utf-8") as f:
             for ch in chapter_markers:
-
                 ts = seconds_to_hms(ch["start"])
                 line = f"{ts} {ch['title']}\n"
                 f.write(line)
@@ -1140,19 +1178,14 @@ async def main():
         print("Saved:", telegram_path)
 
         # =========================
-        # FFMETADATA
+        # FFMETADATA + M4B
         # =========================
         meta_file = os.path.join(
             output_dir,
             safe_filename(f"{name}_chapters.ffmeta")
         )
         generate_ffmetadata_for_m4b(chapter_markers, cum, meta_file)
-
         print("Saved:", meta_file)
-
-        # =========================
-        # M4B
-        # =========================
         output_m4b = os.path.join(
             output_dir,
             safe_filename(f"{name}.m4b")
