@@ -24,17 +24,130 @@ CORRUPT_THRESHOLD = 1500
 # CLEANING + META LEAK REMOVAL
 # =========================
 def clean_text(text):
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'http\S+', '', text)
-    text = re.sub(r'\\+', '', text)
-    text = re.sub(r'\[[0-9]+\]', '', text)
-    text = re.sub(r'[<>]', '', text)
-    return text.strip()
     # Remove short lines at the end (meta leaks, references)
     lines = text.split('\n')
     while lines and (len(lines[-1].strip()) < 5 or re.match(r'^\s*(page|p|www|http|note|ref)', lines[-1], re.I)):
         lines.pop()
-    return '\n'.join(lines)
+    text = '\n'.join(lines)
+    text = re.sub(r'\\+', '', text)
+    text = re.sub(r'\[[0-9]+\]', '', text)
+    text = re.sub(r'[<>]', '', text)
+    return text.strip()
+
+def normalize_arabic_text(text):
+    """Comprehensive Arabic text normalization for clean TTS pronunciation.
+    Handles: English text, special symbols, diacritics, tatweel,
+    punctuation issues, numbers, and other PDF extraction artifacts.
+    """
+    # --- Phase 0: Strip bullet points and list markers FIRST ---
+    # Must run before English text removal (lettered lists need the letter)
+    # and before line joining (markers must still be at line starts)
+    # Unicode bullets
+    text = re.sub(r'(?m)^\s*[\u2022\u2023\u2043\u25AA\u25AB\u25A0\u25A1\u25CF\u25CB\u25C6\u25C7\u2605\u2606\u27A4\u25B6\u25B8\u25BE\u25BF\u279C]\s*', '', text)
+    # Dash/asterisk bullets at line start
+    text = re.sub(r'(?m)^\s*[-*]\s+', '', text)
+    # Numbered lists: "1. ", "2) ", "(3) "
+    text = re.sub(r'(?m)^\s*\(?\d+\)?[.)]\s+', '', text)
+    # Lettered lists: "a. ", "b) ", "(c) " (before English removal!)
+    text = re.sub(r'(?m)^\s*\(?[a-zA-Z]\)?[.)]\s+', '', text)
+    # Arabic-Indic numbered lists: "١. ", "٢) " etc.
+    text = re.sub(r'(?m)^\s*[\u0660-\u0669]+[.)]\s+', '', text)
+    # Arabic star bullet: ٭
+    text = re.sub(r'(?m)^\s*٭\s*', '', text)
+
+    # --- Phase 1: Remove non-Arabic content ---
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'www\.\S+', '', text)
+
+    # Remove email addresses
+    text = re.sub(r'\S+@\S+\.\S+', '', text)
+
+    # Remove HTML/XML tags
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Remove all English/Latin characters (primary noise source in Arabic TTS)
+    text = re.sub(r'[a-zA-Z]+', '', text)
+
+    # --- Phase 2: Clean Arabic-specific artifacts ---
+    # Remove tatweel/kashida (elongation character U+0640) — causes stretched pronunciation
+    text = re.sub(r'\u0640', '', text)
+
+    # Remove Arabic diacritics/tashkeel — TTS handles pronunciation on its own;
+    # diacritics can cause double-reading of short vowels
+    text = re.sub(
+        r'[\u0617-\u061A\u064B-\u0652\u0656-\u065F\u0670'
+        r'\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]',
+        '', text
+    )
+
+    # --- Phase 3: Normalize punctuation ---
+    # En-dash / em-dash → space (dash pronunciation is awkward in Arabic)
+    text = re.sub(r'[\u2013\u2014]', ' ', text)
+
+    # Normalize various quote styles to Arabic equivalents
+    text = re.sub(r'[“”«»„‟‹›]', '“', text)
+    text = re.sub(r"[‘’‚‛′″]", '‘', text)
+
+    # Normalize repeated punctuation (both English and Arabic forms)
+    text = re.sub(r'\.{3,}', '…', text)    # 3+ dots → ellipsis
+    text = re.sub(r'؟{2,}', '؟', text)
+    text = re.sub(r'!{2,}', '!', text)
+    text = re.sub(r'،{2,}', '،', text)
+    text = re.sub(r',{2,}', '،', text)      # English commas → single Arabic comma
+    text = re.sub(r';{2,}', ';', text)      # repeated semicolons
+    text = re.sub(r':{2,}', ':', text)
+
+    # Remove HTML entities (e.g. &amp; &lt; &gt; &nbsp; etc.)
+    text = re.sub(r'&\w+;', '', text)
+    text = re.sub(r'&#\d+;', '', text)
+
+    # Remove symbols that TTS reads as English words or causes artifacts
+    text = re.sub(r'[#&%$@*+=~`^|\\<>]', '', text)
+
+    # --- Phase 4: Handle brackets and parentheses ---
+    # Remove square bracket content (almost always footnotes/references)
+    text = re.sub(r'\[([^\]]*)\]', '', text)
+
+    # Remove parentheses — orphaned brackets cause awkward TTS pauses;
+    # keep the content inside since it may be meaningful Arabic text
+    text = text.replace('(', ' ').replace(')', ' ')
+    text = text.replace('{', ' ').replace('}', ' ')
+
+    # --- Phase 5: Number handling ---
+    # Convert Western digits (0-9) to Arabic-Indic digits (٠-٩)
+    # so the TTS engine reads them with Arabic pronunciation
+    digit_map = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
+    text = text.translate(digit_map)
+
+    # --- Phase 6: Punctuation spacing (Arabic convention) ---
+    # No space before punctuation
+    text = re.sub(r'\s+،', '،', text)
+    text = re.sub(r'\s+؟', '؟', text)
+    text = re.sub(r'\s+!', '!', text)
+    text = re.sub(r'\s+:', ':', text)
+    text = re.sub(r'\s+;', ';', text)
+    text = re.sub(r'\s+\.', '.', text)
+    text = re.sub(r'\s+…', '…', text)
+
+    # Ensure space after punctuation if missing
+    text = re.sub(r'،(?!\s|\n|$)', '، ', text)
+    text = re.sub(r'؟(?!\s|\n|$)', '؟ ', text)
+    text = re.sub(r'!(?!\s|\n|$)', '! ', text)
+    text = re.sub(r'\.(?!\s|\n|$|\d)', '. ', text)
+    text = re.sub(r';(?!\s|\n|$)', '; ', text)
+    text = re.sub(r':(?!\s|\n|$)', ': ', text)
+    text = re.sub(r'…(?!\s|\n|$)', '… ', text)
+
+    # --- Phase 7: Final cleanup ---
+    # Collapse multiple spaces / strip
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    # Remove leading/trailing punctuation fragments left after cleaning
+    text = re.sub(r'^[\s،.؟!:;,…]+', '', text)
+    text = re.sub(r'[\s،.؟!:;,…]+$', '', text)
+
+    return text
 
 # =========================
 # SSML BUILDER
@@ -322,6 +435,10 @@ async def main():
         else:
             print("Detected language is Arabic, skipping translation.")
             text_ar = text
+
+        # Normalize Arabic text for clean TTS pronunciation
+        text_ar = normalize_arabic_text(text_ar)
+        print("NORMALIZED length:", len(text_ar))
 
         # Split & generate audio
         chunks = split_text(text_ar, DEFAULT_CHUNK_SIZE)
